@@ -18,6 +18,11 @@
 #include "JuceHeader.h"
 
 #include <sstream>
+#include <thread>
+
+//#include <minwindef.h>
+#include <winsock2.h>
+#pragma comment(lib,"ws2_32.lib") 
 
 enum CommandIndex
 {
@@ -27,7 +32,7 @@ enum CommandIndex
     DEVICE,
     VIRTUAL,
     TXTFILE,
-    DECIMAL,
+    DECIMALA, // NOTE: DECIMAL has been renamed, as there is a DECIMAL defined in one of windows headers
     HEXADECIMAL,
     CHANNEL,
     OCTAVE_MIDDLE_C,
@@ -56,7 +61,8 @@ enum CommandIndex
     TUNE_REQUEST,
     MPE_CONFIGURATION,
     MPE_TEST,
-    RAW_MIDI
+    RAW_MIDI,
+    NETWORK
 };
 
 static const int DEFAULT_OCTAVE_MIDDLE_C = 3;
@@ -99,11 +105,12 @@ public:
     sendMidiApplication()
     {
         commands_.add({"dev",   	"device",                   DEVICE,                 1, "name",           "Set the name of the MIDI output port"});
+        commands_.add({"net",   	"network",                  NETWORK,                1, "port",           "Starts listening for UDP messages at given port" });
         commands_.add({"virt",  	"virtual",                  VIRTUAL,               -1, "(name)",         "Use virtual MIDI port with optional name (Linux/macOS)"});
         commands_.add({"list",  	"",                         LIST,                   0, "",               "Lists the MIDI output ports"});
         commands_.add({"panic", 	"",                         PANIC,                  0, "",               "Sends all possible Note Offs and relevant panic CCs"});
         commands_.add({"file",  	"",                         TXTFILE,                1, "path",           "Loads commands from the specified program file"});
-        commands_.add({"dec",   	"decimal",                  DECIMAL,                0, "",               "Interpret the next numbers as decimals by default"});
+        commands_.add({"dec",   	"decimal",                  DECIMALA,                0, "",               "Interpret the next numbers as decimals by default"});
         commands_.add({"hex",   	"hexadecimal",              HEXADECIMAL,            0, "",               "Interpret the next numbers as hexadecimals by default"});
         commands_.add({"ch",    	"channel",                  CHANNEL,                1, "number",         "Set MIDI channel for the commands (1-16), defaults to 1"});
         commands_.add({"omc",   	"octave-middle-c",          OCTAVE_MIDDLE_C,        1, "number",         "Set octave for middle C, defaults to 3"});
@@ -140,12 +147,23 @@ public:
         currentCommand_ = ApplicationCommand::Dummy();
         lastTimeStampCounter_ = 0;
         lastTimeStamp_ = 0;
+
+        // initialise winsock
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+        {
+            printf("Winsock Failed. Error Code: %d", WSAGetLastError());
+            return;
+        }
     }
     
     const String getApplicationName() override       { return ProjectInfo::projectName; }
     const String getApplicationVersion() override    { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override       { return true; }
-    void systemRequestedQuit() override              { quit(); }
+    void systemRequestedQuit() override              
+    { 
+        quit(); 
+    }
     
     void initialise(const String&) override
     {
@@ -181,7 +199,10 @@ public:
             printUsage();
         }
         
-        systemRequestedQuit();
+        if (!isServerStarted)
+        {
+            systemRequestedQuit();
+        }
     }
     
     void shutdown() override {}
@@ -190,6 +211,8 @@ public:
     void anotherInstanceStarted(const String&) override {}
     void unhandledException(const std::exception*, const String&, int) override { jassertfalse; }
     
+    int networkPort{ 0 };
+
 private:
     ApplicationCommand* findApplicationCommand(const String& param)
     {
@@ -290,7 +313,7 @@ private:
                 // handle configuration commands immediately without setting up a new one
                 switch (cmd->command_)
                 {
-                    case DECIMAL:
+                    case DECIMALA:
                         useHexadecimalsByDefault_ = false;
                         break;
                     case HEXADECIMAL:
@@ -400,6 +423,84 @@ private:
         }
     }
     
+    /**
+     * Dedicated thread loop to receive udp messages and execute commands out of it.
+     * 
+     * \param app
+     */
+    static void listenerRun(sendMidiApplication* app)
+    {
+        constexpr int BUFLEN{ 512 };
+        sockaddr_in server, client;
+
+        // create a socket
+        SOCKET server_socket;
+        if ((server_socket = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
+        {
+            printf("Could not create socket: %d", WSAGetLastError());
+        }
+        
+        // prepare the sockaddr_in structure
+        server.sin_family = AF_INET;
+        server.sin_addr.s_addr = INADDR_ANY;
+        server.sin_port = htons(static_cast<u_short>(app->networkPort));
+
+        // bind
+        if (bind(server_socket, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR)
+        {
+            printf("Bind failed with error code: %d", WSAGetLastError());
+            return;
+        }
+
+        printf("Start listening at port %d.\n", app->networkPort);
+
+        while (true)
+        {
+            char message[BUFLEN] = {};
+
+            // try to receive some data, this is a blocking call
+            int message_len;
+            int slen = sizeof(sockaddr_in);
+            message_len = recvfrom(server_socket, message, BUFLEN, 0, (sockaddr*)&client, &slen);
+            if (message_len == SOCKET_ERROR)
+            {
+                printf("recvfrom() failed with error code: %d", WSAGetLastError());
+                continue;
+            }
+
+            if (message_len == 0)
+                continue;
+
+            // process parameters and execute the command
+            String msg(message);
+            auto params = app->parseLineAsParameters(msg);
+            app->parseParameters(params);
+        }
+
+        closesocket(server_socket);
+        WSACleanup();
+    }
+
+    /**
+     * Start a new UDP server to listen for message on a given port. 
+     * Start a new thread
+     * 
+     * \param port
+     */
+    void startServer(int port)
+    {
+        if (isServerStarted)
+        {
+            std::cout << "Server is already started!" << std::endl;
+            return;
+        }
+
+        // start thread
+        isServerStarted = true;
+        networkPort = port;
+        listenerThread = std::thread(listenerRun, this);
+    }
+
     void executeCommand(ApplicationCommand& cmd)
     {
         switch (cmd.command_)
@@ -446,6 +547,10 @@ private:
                 }
                 break;
             }
+            case NETWORK:
+                // TODO: start listening for udp messages at a given port and redirect them into output MIDI
+                startServer(asDecOrHexIntValue(cmd.opts_[0]));
+                break;
             case VIRTUAL:
             {
 #if (JUCE_LINUX || JUCE_MAC)
@@ -499,7 +604,7 @@ private:
                 }
                 break;
             }
-            case DECIMAL:
+            case DECIMALA:
             case HEXADECIMAL:
                 // these are not commands but rather configuration options
                 // allow them to be inlined anywhere by handling them immediately in the
@@ -1134,6 +1239,10 @@ private:
     ApplicationCommand currentCommand_;
     uint32 lastTimeStampCounter_;
     int64_t lastTimeStamp_;
+
+    // network listener
+    bool isServerStarted{ false };
+    std::thread listenerThread;
 };
 
 START_JUCE_APPLICATION (sendMidiApplication)
