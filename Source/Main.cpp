@@ -167,6 +167,8 @@ public:
     
     void initialise(const String&) override
     {
+        printf("Welcome to Send MIDI\n");
+
         StringArray cmdLineParams(getCommandLineParameterArray());
         if (cmdLineParams.contains("--help") || cmdLineParams.contains("-h"))
         {
@@ -202,6 +204,10 @@ public:
         if (!isServerStarted)
         {
             systemRequestedQuit();
+        }
+        else
+        {
+            printf("Server started at port %d for device %s\n", networkPort, midiOutName_.toStdString().c_str());
         }
     }
     
@@ -451,8 +457,6 @@ private:
             printf("Bind failed with error code: %d", WSAGetLastError());
             return;
         }
-
-        printf("Start listening at port %d.\n", app->networkPort);
 
         while (true)
         {
@@ -745,7 +749,7 @@ private:
                 MemoryBlock mem(cmd.opts_.size(), true);
                 for (int i = 0; i < cmd.opts_.size(); ++i)
                 {
-                    mem[i] = cmd.opts_[i].getIntValue();
+                    mem[i] = static_cast<char>(cmd.opts_[i].getIntValue());
                 }
                 sendMidiMessage(MidiMessage::createSysExMessage(mem.getData(), (int)mem.getSize()));
                 break;
