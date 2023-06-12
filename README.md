@@ -35,6 +35,7 @@ To use it, simply type "sendmidi" or "sendmidi.exe" on the command line and foll
 These are all the supported commands:
 ```
   dev   name           Set the name of the MIDI output port
+  net   port           Start listening to a network port for udp string messages that could be transmitted into midi commands
   virt  (name)         Use virtual MIDI port with optional name (Linux/macOS)
   list                 Lists the MIDI output ports
   panic                Sends all possible Note Offs and relevant panic CCs
